@@ -65,20 +65,30 @@ class SMCFeatureEngineer:
         return structure_series
     
     def _calculate_order_blocks(self, df):
+        """Improved order block calculation with DataFrame validation"""
+        if not isinstance(df, pd.DataFrame):
+            raise ValueError("Input must be a pandas DataFrame")
+            
         ob_strength = pd.Series(0.0, index=df.index)
-        for i in range(2, len(df)):
-            # Bullish Order Block
-            if (df['Close'].iloc[i-2] < df['Open'].iloc[i-2] and
-                df['Close'].iloc[i-1] < df['Open'].iloc[i-1] and
-                df['Close'].iloc[i] > df['Open'].iloc[i] and
-                df['Volume'].iloc[i] > df['Volume'].iloc[i-1]*1.5):
-                ob_strength.iloc[i] = 1.0  # Strength value
-            # Bearish Order Block
-            elif (df['Close'].iloc[i-2] > df['Open'].iloc[i-2] and
-                df['Close'].iloc[i-1] > df['Open'].iloc[i-1] and
-                df['Close'].iloc[i] < df['Open'].iloc[i] and
-                df['Volume'].iloc[i] > df['Volume'].iloc[i-1]*1.5):
-                ob_strength.iloc[i] = -1.0  # Strength value
+        
+        # Vectorized operations for better performance
+        bearish_mask = (
+            (df['Close'].shift(2) > df['Open'].shift(2)) &
+            (df['Close'].shift(1) > df['Open'].shift(1)) &
+            (df['Close'] < df['Open']) &
+            (df['Volume'] > df['Volume'].shift(1) * 1.5)
+        )
+        
+        bullish_mask = (
+            (df['Close'].shift(2) < df['Open'].shift(2)) &
+            (df['Close'].shift(1) < df['Open'].shift(1)) &
+            (df['Close'] > df['Open']) &
+            (df['Volume'] > df['Volume'].shift(1) * 1.5)
+        )
+        
+        ob_strength = ob_strength.mask(bullish_mask, 1.0)
+        ob_strength = ob_strength.mask(bearish_mask, -1.0)
+        
         return ob_strength
 
     def _calculate_liquidity_zones(self, df):
@@ -195,134 +205,186 @@ class UniversalSMCPredictor:
         labels = np.array(labels)[:len(data)-3]  # Account for lookahead
         return labels
     
-    def generate_signals(self):  # Unchanged
+    def generate_signals(self, data):
+        """Generate trading signals with proper DataFrame validation"""
+        if not isinstance(data, pd.DataFrame):
+            raise ValueError("Input data must be a pandas DataFrame")
+        
         signals = []
-        for idx, row in self.data.iterrows():
-            signal = None
-            price = row['Close']
+        df = data.copy()
+        
+        # Calculate features using DataFrame columns
+        df['ob_strength'] = self.feature_engineer._calculate_order_blocks(df)
+        df['market_structure'] = self.feature_engineer._calculate_market_structure(df)
+        df['liquidity_gradient'] = self.feature_engineer._calculate_liquidity_zones(df)
+        df['imbalance_ratio'] = self.feature_engineer._calculate_imbalance_ratio(df)
+        df['wyckoff_phase'] = self.feature_engineer._calculate_wyckoff_phases(df)
+
+        for idx, row in df.iterrows():
+            signal = 'Neutral'  # Default state
             
-            # Check Order Blocks
-            for block in self.analyzer.order_blocks:
-                if block[1] == idx:
-                    if block[0] == 'Bullish OB' and price <= block[2]:
-                        signal = 'Buy'
-                    elif block[0] == 'Bearish OB' and price >= block[2]:
-                        signal = 'Sell'
-            
-            # Check Liquidity Zones
-            for zone in self.analyzer.liquidity_zones['swing_highs']:
-                if abs(price - zone) < price*0.005:
-                    signal = 'Sell'
-            for zone in self.analyzer.liquidity_zones['swing_lows']:
-                if abs(price - zone) < price*0.005:
-                    signal = 'Buy'
-            
-            # Check Imbalances
-            for imb in self.analyzer.imbalances:
-                if imb[0] == 'Bullish FVG' and imb[2] <= price <= imb[3]:
-                    signal = 'Buy'
-                elif imb[0] == 'Bearish FVG' and imb[2] <= price <= imb[3]:
-                    signal = 'Sell'
-            
+            # Access values using .at for label-based access
+            ob = df.at[idx, 'ob_strength']
+            ms = df.at[idx, 'market_structure']
+            liq = df.at[idx, 'liquidity_gradient']
+            imb = df.at[idx, 'imbalance_ratio']
+            wyk = df.at[idx, 'wyckoff_phase']
+
+            # Signal logic with explicit conditions
+            if any([
+                ob > 0.8,
+                ms in [1, 2],
+                liq < -0.7,
+                imb > 0.7,
+                wyk == 1
+            ]):
+                signal = 'Long'
+            elif any([
+                ob < -0.8,
+                ms in [-1, -2],
+                liq > 0.7,
+                imb < -0.7,
+                wyk == -1
+            ]):
+                signal = 'Exit'
+                
             signals.append(signal)
         
-        self.data['Signal'] = signals
-        return self.data
+        return pd.Series(signals, index=df.index, name='signals')
 
-    def analyze_market(self, universe='sp500', year_back=1):
-        """Analyze entire market universe"""
+    def analyze_market(self, universe='sp500', year_back=1, batch_size=50):
+        """Analyze entire market universe with proper DataFrame handling"""
         tickers = self._get_universe_tickers(universe)
         analysis_results = []
         
-        for ticker in tickers:
-            try:
-                data = download(ticker, period=f'{year_back}y')
-                if len(data) < 100:  # Skip illiquid stocks
-                    continue
+        # Process tickers in batches to avoid memory issues
+        for i in range(0, len(tickers), batch_size):
+            batch_tickers = tickers[i:i + batch_size]
+            for ticker in batch_tickers:
+                try:
+                    data = download(ticker, period=f'{year_back}y')
+                    if len(data) < 100:
+                        continue
+                        
+                    # Ensure we're working with proper DataFrame
+                    df = data.copy()
+                    features = self.feature_engineer.calculate_features(df)
+                    signals = self.generate_signals(df)  # Pass DataFrame instead of features array
+                    positions = self.calculate_positions(df, signals)
                     
-                features = self.feature_engineer.calculate_features(data)
-                signals = self.generate_signals(features)
-                positions = self.calculate_positions(data, signals)
-                
-                # Generate analysis chart
-                self.plot_analysis(ticker, data, signals, positions)
-                
-                # Save results
-                analysis_results.append({
-                    'ticker': ticker,
-                    'current_signal': signals[-1],
-                    'return_1m': data['Close'].pct_change(21)[-1],
-                    'volatility': data['Close'].pct_change().std() * np.sqrt(252)
-                })
-                
-            except Exception as e:
-                print(f"Error processing {ticker}: {str(e)}")
+                    # Generate analysis chart with enhanced visuals
+                    self.plot_analysis(ticker, df, signals, positions)
+                    
+                    # Safe indexing using iloc
+                    analysis_results.append({
+                        'ticker': ticker,
+                        'current_signal': signals.iloc[-1],  # Use iloc for positional access
+                        'return_1m': df['Close'].pct_change(21).iloc[-1],
+                        'volatility': df['Close'].pct_change().std() * np.sqrt(252)
+                    })
+                    
+                except Exception as e:
+                    print(f"Error processing {ticker}: {str(e)}")
+            
+            # Clear memory after each batch
+            plt.close('all')
         
         self.generate_market_report(analysis_results)
         return analysis_results
 
     def calculate_positions(self, data, signals):
-        """Calculate position sizes and risk parameters"""
+        """Calculate position sizes and risk parameters using proper pandas indexing"""
         positions = pd.DataFrame(index=data.index)
         positions['signal'] = signals
-        positions['position'] = 0
+        positions['position'] = 0.0
         positions['entry_price'] = np.nan
         positions['stop_loss'] = np.nan
         positions['take_profit'] = np.nan
         
         in_position = False
         for i in range(len(positions)):
-            if not in_position and positions.signal.iloc[i] == 'Long':
-                entry_price = data['Close'].iloc[i]
-                positions.entry_price.iloc[i] = entry_price
-                positions.stop_loss.iloc[i] = entry_price * (1 - self.risk_params['stop_loss'])
-                positions.take_profit.iloc[i] = entry_price * (1 + self.risk_params['take_profit'])
-                positions.position.iloc[i] = self.risk_params['risk_per_trade']
+            current_idx = positions.index[i]
+            
+            if not in_position and positions['signal'].iat[i] == 'Long':
+                entry_price = data['Close'].iat[i]
+                positions.at[current_idx, 'entry_price'] = entry_price
+                positions.at[current_idx, 'stop_loss'] = entry_price * (1 - self.risk_params['stop_loss'])
+                positions.at[current_idx, 'take_profit'] = entry_price * (1 + self.risk_params['take_profit'])
+                positions.at[current_idx, 'position'] = self.risk_params['risk_per_trade']
                 in_position = True
             elif in_position:
-                if positions.signal.iloc[i] == 'Exit' or \
-                   data['Low'].iloc[i] < positions.stop_loss.iloc[i-1] or \
-                   data['High'].iloc[i] > positions.take_profit.iloc[i-1]:
-                    positions.position.iloc[i] = 0
+                prev_idx = positions.index[i-1]
+                
+                if positions['signal'].iat[i] == 'Exit' or \
+                data['Low'].iat[i] < positions.at[prev_idx, 'stop_loss'] or \
+                data['High'].iat[i] > positions.at[prev_idx, 'take_profit']:
+                    positions.at[current_idx, 'position'] = 0.0
                     in_position = False
                 else:
-                    positions.position.iloc[i] = positions.position.iloc[i-1]
-                    positions.entry_price.iloc[i] = positions.entry_price.iloc[i-1]
-                    positions.stop_loss.iloc[i] = positions.stop_loss.iloc[i-1] * 1.01  # Trailing stop
-                    positions.take_profit.iloc[i] = positions.take_profit.iloc[i-1] * 1.005
+                    # Copy previous values using at/iat for scalar access
+                    positions.at[current_idx, 'position'] = positions.at[prev_idx, 'position']
+                    positions.at[current_idx, 'entry_price'] = positions.at[prev_idx, 'entry_price']
+                    positions.at[current_idx, 'stop_loss'] = positions.at[prev_idx, 'stop_loss'] * 1.01
+                    positions.at[current_idx, 'take_profit'] = positions.at[prev_idx, 'take_profit'] * 1.005
+                    
         return positions
 
     def plot_analysis(self, ticker, data, signals, positions):
-        """Generate comprehensive analysis chart"""
-        plt.figure(figsize=(20, 15))
+        """Generate comprehensive analysis chart with improved user-friendliness"""
+        plt.figure(figsize=(20, 12))
         
-        # Price Chart
+        # Price Chart with Signals
         ax1 = plt.subplot(3, 1, 1)
-        plt.plot(data['Close'], label='Price', color='black')
-        plt.scatter(data.index[signals == 'Long'], 
-                   data['Close'][signals == 'Long'], 
-                   marker='^', color='g', s=100)
-        plt.scatter(data.index[signals == 'Exit'], 
-                   data['Close'][signals == 'Exit'], 
-                   marker='v', color='r', s=100)
-        plt.title(f'{ticker} Analysis - SMC Model')
-        
-        # Indicators
+        data['Close'].plot(ax=ax1, label='Price', color='blue', linewidth=1.5)
+        ax1.scatter(signals[signals == 'Long'].index, 
+                    data.loc[signals == 'Long', 'Close'], 
+                    marker='^', color='green', s=100, label='Buy Signal')
+        ax1.scatter(signals[signals == 'Exit'].index, 
+                    data.loc[signals == 'Exit', 'Close'], 
+                    marker='v', color='red', s=100, label='Sell Signal')
+        ax1.set_title(f'{ticker} Analysis - SMC Model', fontsize=16)
+        ax1.legend(loc='upper left')
+        ax1.grid(True, linestyle='--', alpha=0.7)
+        ax1.set_yscale('log')  # Use logarithmic scale for price axis
+
+        # Annotate key points
+        for idx, signal in signals.iteritems():
+            if signal == 'Long':
+                ax1.annotate('Buy', xy=(idx, data.loc[idx, 'Close']), xytext=(10, 20),
+                            textcoords='offset points', arrowprops=dict(arrowstyle='->', color='green'))
+            elif signal == 'Exit':
+                ax1.annotate('Sell', xy=(idx, data.loc[idx, 'Close']), xytext=(10, -20),
+                            textcoords='offset points', arrowprops=dict(arrowstyle='->', color='red'))
+
+        # Technical Indicators
         ax2 = plt.subplot(3, 1, 2, sharex=ax1)
-        plt.plot(data['Close'].rolling(50).mean(), label='50 DMA')
-        plt.plot(data['Close'].rolling(200).mean(), label='200 DMA')
-        plt.legend()
-        
-        # Risk Management
+        data['Close'].rolling(50).mean().plot(ax=ax2, label='50 DMA', color='orange', linewidth=1.5)
+        data['Close'].rolling(200).mean().plot(ax=ax2, label='200 DMA', color='purple', linewidth=1.5)
+        ax2.fill_between(data.index, 
+                        data['Close'].rolling(50).min(), 
+                        data['Close'].rolling(50).max(), 
+                        color='gray', alpha=0.2, label='50 Period Range')
+        ax2.set_title('Trend Analysis', fontsize=14)
+        ax2.legend(loc='upper left')
+        ax2.grid(True, linestyle='--', alpha=0.7)
+
+        # Position Management
         ax3 = plt.subplot(3, 1, 3, sharex=ax1)
-        plt.plot(positions['position'], label='Position Size')
-        plt.plot(positions['stop_loss'], label='Stop Loss', linestyle='--')
-        plt.plot(positions['take_profit'], label='Take Profit', linestyle='--')
-        plt.legend()
+        positions['position'].plot(ax=ax3, color='darkgreen', linewidth=1.5, label='Position Size')
+        positions['stop_loss'].plot(ax=ax3, color='maroon', linestyle='--', label='Stop Loss')
+        positions['take_profit'].plot(ax=ax3, color='darkblue', linestyle='--', label='Take Profit')
+        ax3.set_title('Risk Management', fontsize=14)
+        ax3.set_ylabel('Price Level')
+        ax3.legend(loc='upper left')
+        ax3.grid(True, linestyle='--', alpha=0.7)
+
+        # Formatting
+        plt.tight_layout()
+        plt.subplots_adjust(hspace=0.2)
         
         # Save chart
         os.makedirs('analysis_charts', exist_ok=True)
-        plt.savefig(f'analysis_charts/{ticker}_analysis.png')
+        plt.savefig(f'analysis_charts/{ticker}_analysis.png', dpi=300, bbox_inches='tight')
         plt.close()
 
     def _get_universe_tickers(self, universe='sp500'):
