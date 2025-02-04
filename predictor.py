@@ -1,82 +1,41 @@
 from datetime import datetime
 import os
+from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from yfinance import Ticker, download
 import matplotlib.dates as mdates
 import matplotlib
-from typing import Dict, List, Optional, Tuple
-
-matplotlib.use('Agg')
-
-# Configuration paths (ensure this exists in your project)
-class PATHS:
-    reports = 'analysis_reports'
+matplotlib.use('Agg') 
 # Enhanced SMC Feature Extractor
 class SMCFeatureEngineer:
     def __init__(self, window=20):
         self.window = window
         self.scaler = StandardScaler()
-        self.required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-
-    def validate_dataframe(self, df: pd.DataFrame) -> None:
-        missing = [col for col in self.required_columns if col not in df.columns]
-        if missing:
-            raise ValueError(f"Missing required columns: {missing}")
-        if df.isnull().values.any():
-            df.ffill(inplace=True)
-
-    def calculate_features(self, df: pd.DataFrame) -> Tuple[np.ndarray, pd.DataFrame]:
-        self.validate_dataframe(df)
         
+    def calculate_features(self, df):
+        # Basic Price Features
         df = df.copy()
         df['returns'] = df['Close'].pct_change()
-        df['volatility'] = df['returns'].rolling(self.window, min_periods=1).std()
-        df['atr'] = self._calculate_atr(df)  # Now part of the main DataFrame
+        df['volatility'] = df['returns'].rolling(self.window).std()
         
-        # Calculate other features
+        # Calculate SMC features with proper alignment
         df['market_structure'] = self._calculate_market_structure(df)
         df['order_block_strength'] = self._calculate_order_blocks(df)
         df['liquidity_gradient'] = self._calculate_liquidity_zones(df)
         df['imbalance_ratio'] = self._calculate_imbalance_ratio(df)
         df['wyckoff_phase'] = self._calculate_wyckoff_phases(df)
         
-        # Clean and align data
-        feature_columns = ['market_structure', 'order_block_strength', 
-                        'liquidity_gradient', 'imbalance_ratio', 
-                        'wyckoff_phase', 'volatility', 'atr']
-        processed_df = df[feature_columns].ffill().dropna()
-        aligned_data = df.loc[processed_df.index]  # Contains all original columns + features
+        # Normalize features with forward filling
+        features = df[['market_structure', 'order_block_strength', 
+                      'liquidity_gradient', 'imbalance_ratio', 
+                      'wyckoff_phase', 'volatility']].ffill().dropna()
         
-        # Scale features
-        features = self.scaler.fit_transform(processed_df)
-        
-        return features, aligned_data
+        return self.scaler.fit_transform(features)
 
-    def _calculate_atr(self, df: pd.DataFrame, period=14) -> pd.Series:
-        try:
-            high = df['High']
-            low = df['Low']
-            close = df['Close']
-            
-            # Calculate True Range (TR)
-            tr = pd.concat([
-                high - low,
-                (high - close.shift()).abs(),
-                (low - close.shift()).abs()
-            ], axis=1).max(axis=1)
-            
-            # Calculate ATR with fallback to simple volatility
-            atr = tr.rolling(period, min_periods=1).mean().bfill()
-            return atr.fillna(high - low)  # Fallback if ATR calculation fails
-        except KeyError as e:
-            print(f"Missing OHLC columns: {e}")
-            return (df['High'] - df['Low']).fillna(0)  # Simple volatility
-    
     def _calculate_market_structure(self, df):
         structure_series = pd.Series(0, index=df.index)
         highs = df['High']
@@ -185,99 +144,54 @@ class SMCTransformer(tf.keras.Model):
     def __init__(self, num_features, num_classes=3):
         super().__init__()
         self.attention = tf.keras.layers.MultiHeadAttention(
-            num_heads=8, key_dim=64, dropout=0.1)
+            num_heads=4, key_dim=64)
         self.lstm = tf.keras.layers.Bidirectional(
-            tf.keras.layers.LSTM(128, return_sequences=True, dropout=0.2))
-        self.conv1d = tf.keras.layers.Conv1D(64, 3, activation='relu', padding='same')
-        self.layer_norm = tf.keras.layers.LayerNormalization()
+            tf.keras.layers.LSTM(128, return_sequences=True))
+        self.conv1d = tf.keras.layers.Conv1D(64, 3, activation='relu')
         self.classifier = tf.keras.Sequential([
             tf.keras.layers.Dense(64, activation='gelu'),
             tf.keras.layers.Dropout(0.3),
             tf.keras.layers.Dense(num_classes, activation='softmax')
         ])
-        self.positional_encoding = self._create_positional_encoding(100, num_features)
-
-    def _create_positional_encoding(self, max_len, d_model):
-        position = np.arange(max_len)[:, np.newaxis]
-        d_even = (d_model // 2) * 2
-        div_term = np.exp(np.arange(0, d_even, 2) * -(np.log(10000.0) / d_even))
-        
-        pe = np.zeros((max_len, d_model))
-        pe[:, 0:d_even:2] = np.sin(position * div_term)
-        pe[:, 1:d_even:2] = np.cos(position * div_term)
-        
-        if d_model % 2 == 1:
-            pe[:, -1] = np.sin(position * div_term[-1])[:, 0]
-            
-        return tf.constant(pe, dtype=tf.float32)
 
     def call(self, inputs):
-        seq_len = tf.shape(inputs)[1]
-        inputs += self.positional_encoding[:seq_len, :]
         x = self.conv1d(inputs)
         x = self.lstm(x)
-        attn_output = self.attention(x, x)
-        x = self.layer_norm(x + attn_output)
+        x = self.attention(x, x)
         x = tf.reduce_mean(x, axis=1)
         return self.classifier(x)
 
-
-class PositionManager:
-    def __init__(self, risk_params: Dict):
-        self.risk_params = risk_params
-
-    def calculate_position_size(self, entry_price: float, atr: float) -> float:
-        risk_per_share = atr * self.risk_params['stop_loss_multiplier']
-        return min(
-            self.risk_params['risk_per_trade'] / risk_per_share,
-            self.risk_params['max_position_size']
-        )
-
-    def calculate_stop_levels(self, entry_price: float, atr: float, direction: str) -> Tuple[float, float]:
-        if direction == 'long':
-            return (
-                entry_price - atr * self.risk_params['stop_loss_multiplier'],
-                entry_price + atr * self.risk_params['take_profit_multiplier']
-            )
-        return (
-            entry_price + atr * self.risk_params['stop_loss_multiplier'],
-            entry_price - atr * self.risk_params['take_profit_multiplier']
-        )
-
 # Universal SMC Predictor
 class UniversalSMCPredictor:
-    def __init__(self, risk_params: Optional[Dict] = None):
+    def __init__(self, risk_per_trade=0.01, stop_loss_pct=0.05, take_profit_pct=0.10):
         self.feature_engineer = SMCFeatureEngineer()
         self.model = self._build_model()
         self.class_labels = ['Long', 'Neutral', 'Exit']
-        self.position_manager = PositionManager(
-            risk_params or {
-                'risk_per_trade': 0.01,
-                'stop_loss_multiplier': 1.5,
-                'take_profit_multiplier': 3.0,
-                'max_position_size': 0.1
-            }
-        )
-
-    def save_model(self, path=r'C:\Roshan\nepse predictor\trained_models\model.keras'):
-        os.makedirs(os.path.dirname(path), exist_ok=True)  # Create directory if missing
-        self.model.save(path, save_format='keras')
+        self.risk_params = {
+            'risk_per_trade': risk_per_trade,
+            'stop_loss': stop_loss_pct,
+            'take_profit': take_profit_pct
+        }
+        
+    def save_model(self, path=r'C:\Roshan\nepse predictor\model.keras'):
+        """Export trained model to specified path"""
+        self.model.save(path)
         print(f"Model saved to {path}")
 
-    def load_model(self, path=r'C:\Roshan\nepse predictor\trained_models\model.keras'):
-        try:
-            self.model = tf.keras.models.load_model(path)
-            print("Model loaded successfully")
-        except (OSError, ValueError) as e:
-            print(f"Error loading model: {str(e)}")
-            raise
+
+    def load_model(self, path='smc_model'):
+        """Load pre-trained model"""
+        self.model = tf.keras.models.load_model(path)
+        print("Model loaded successfully")
 
     def _build_model(self):
-        return SMCTransformer(num_features=7)
+        return SMCTransformer(num_features=6)
 
     def _generate_labels(self, data):
         """Generate target labels based on future price movements (3-day horizon)"""
         labels = []
+        
+        # Calculate future returns
         future_returns = data['Close'].pct_change(3).shift(-3)
         
         # Create labels based on return thresholds
@@ -289,8 +203,8 @@ class UniversalSMCPredictor:
             else:
                 labels.append(2)  # Hold
         
-        # Trim the last 3 entries which have NaN future_returns
-        labels = np.array(labels)[:-3]
+        # Convert to numpy array and align with features
+        labels = np.array(labels)[:len(data)-3]  # Account for lookahead
         return labels
     
     def generate_signals(self, data):
@@ -342,259 +256,222 @@ class UniversalSMCPredictor:
         return pd.Series(signals, index=df.index, name='signals')
 
     def analyze_market(self, universe='sp500', year_back=1, batch_size=50):
+        """Analyze entire market universe with proper DataFrame handling"""
         tickers = self._get_universe_tickers(universe)
         analysis_results = []
         
+        # Process tickers in batches to avoid memory issues
         for i in range(0, len(tickers), batch_size):
             batch_tickers = tickers[i:i + batch_size]
-            for ticker in tickers:
+            for ticker in batch_tickers:
                 try:
-                    raw_data = download(ticker, period=f'{year_back}y')
-                    
-                    # Basic data validation
-                    if raw_data.empty or len(raw_data) < 100:
-                        print(f"Skipped {ticker}: insufficient data")
+                    data = download(ticker, period=f'{year_back}y')
+                    if len(data) < 100:
                         continue
                         
-                    # Feature engineering
-                    features, aligned_data = self.feature_engineer.calculate_features(raw_data)
+                    # Ensure we're working with proper DataFrame
+                    df = data.copy()
+                    features = self.feature_engineer.calculate_features(df)
+                    signals = self.generate_signals(df)  # Pass DataFrame instead of features array
+                    positions = self.calculate_positions(df, signals)
                     
-                    # Post-feature validation
-                    if 'atr' not in aligned_data.columns:
-                        print(f"Skipped {ticker}: ATR missing after feature engineering")
-                        continue
+                    # Generate analysis chart with enhanced visuals
+                    self.plot_analysis(ticker, df, signals, positions)
                     
-                    # Generate signals and positions using aligned_data
-                    signals = self.generate_signals(aligned_data)
-                    positions = self.calculate_positions(aligned_data, signals)
-                    
-                    # Generate analysis chart
-                    self.plot_analysis(ticker, aligned_data, signals, positions)
-                    
+                    # Safe indexing using iloc
                     analysis_results.append({
                         'ticker': ticker,
-                        'current_signal': signals.iloc[-1],
-                        'return_1m': aligned_data['Close'].pct_change(21).iloc[-1],
-                        'volatility': aligned_data['Close'].pct_change().std() * np.sqrt(252)
+                        'current_signal': signals.iloc[-1],  # Use iloc for positional access
+                        'return_1m': df['Close'].pct_change(21).iloc[-1],
+                        'volatility': df['Close'].pct_change().std() * np.sqrt(252)
                     })
                     
                 except Exception as e:
                     print(f"Error processing {ticker}: {str(e)}")
-                    continue
             
+            # Clear memory after each batch
             plt.close('all')
         
         self.generate_market_report(analysis_results)
         return analysis_results
 
-    def calculate_positions(self, data: pd.DataFrame, signals: pd.Series) -> pd.DataFrame:
+    def calculate_positions(self, data, signals):
+        """Calculate position sizes and risk parameters using proper pandas indexing"""
         positions = pd.DataFrame(index=data.index)
         positions['signal'] = signals
         positions['position'] = 0.0
         positions['entry_price'] = np.nan
         positions['stop_loss'] = np.nan
         positions['take_profit'] = np.nan
-        current_position = None
-
-        for i in range(1, len(positions)):
+        
+        in_position = False
+        for i in range(len(positions)):
             current_idx = positions.index[i]
-            prev_idx = positions.index[i-1]
-
-            if not current_position and positions['signal'].iloc[i] == 'Long':
-                self._enter_position(data, positions, current_idx, i, 'long')
-                current_position = 'long'
-
-            elif current_position == 'long':
-                self._update_position(data, positions, current_idx, prev_idx, i, 'long')
-
+            
+            if not in_position and positions['signal'].iat[i] == 'Long':
+                entry_price = data['Close'].iat[i]
+                positions.at[current_idx, 'entry_price'] = entry_price
+                positions.at[current_idx, 'stop_loss'] = entry_price * (1 - self.risk_params['stop_loss'])
+                positions.at[current_idx, 'take_profit'] = entry_price * (1 + self.risk_params['take_profit'])
+                positions.at[current_idx, 'position'] = self.risk_params['risk_per_trade']
+                in_position = True
+            elif in_position:
+                prev_idx = positions.index[i-1]
+                
+                if positions['signal'].iat[i] == 'Exit' or \
+                data['Low'].iat[i] < positions.at[prev_idx, 'stop_loss'] or \
+                data['High'].iat[i] > positions.at[prev_idx, 'take_profit']:
+                    positions.at[current_idx, 'position'] = 0.0
+                    in_position = False
+                else:
+                    # Copy previous values using at/iat for scalar access
+                    positions.at[current_idx, 'position'] = positions.at[prev_idx, 'position']
+                    positions.at[current_idx, 'entry_price'] = positions.at[prev_idx, 'entry_price']
+                    positions.at[current_idx, 'stop_loss'] = positions.at[prev_idx, 'stop_loss'] * 1.01
+                    positions.at[current_idx, 'take_profit'] = positions.at[prev_idx, 'take_profit'] * 1.005
+                    
         return positions
 
-    def _enter_position(self, data: pd.DataFrame, positions: pd.DataFrame, 
-                       idx: pd.Timestamp, i: int, direction: str):
-        entry_price = data['Close'].iloc[i]
-        atr = data['atr'].iloc[i]
-        position_size = self.position_manager.calculate_position_size(entry_price, atr)
-        stop_loss, take_profit = self.position_manager.calculate_stop_levels(
-            entry_price, atr, direction
-        )
-
-        positions.at[idx, 'entry_price'] = entry_price
-        positions.at[idx, 'position'] = position_size
-        positions.at[idx, 'stop_loss'] = stop_loss
-        positions.at[idx, 'take_profit'] = take_profit
-
-    def _update_position(self, data: pd.DataFrame, positions: pd.DataFrame,
-                        current_idx: pd.Timestamp, prev_idx: pd.Timestamp,
-                        i: int, direction: str):
-        current_high = data['High'].iloc[i]
-        current_low = data['Low'].iloc[i]
-        atr = data['atr'].iloc[i]
-
-        new_stop = max(positions.at[prev_idx, 'stop_loss'], 
-                      current_high - 0.5 * atr)
-        new_take = positions.at[prev_idx, 'take_profit'] * 1.005
-
-        if current_low < new_stop or current_high > new_take:
-            positions.at[current_idx, 'position'] = 0.0
-            return
-
-        positions.at[current_idx, 'position'] = positions.at[prev_idx, 'position']
-        positions.at[current_idx, 'entry_price'] = positions.at[prev_idx, 'entry_price']
-        positions.at[current_idx, 'stop_loss'] = new_stop
-        positions.at[current_idx, 'take_profit'] = new_take
-
     def plot_analysis(self, ticker, data, signals, positions):
-        """Generate clean, responsive charts with detailed position info"""
-        plt.style.use('seaborn-v0_8-dark')# Updated style name
-        fig, axs = plt.subplots(3, 1, figsize=(24, 18), 
-                            gridspec_kw={'height_ratios': [3, 1, 1]})
+        """Generate a clean, well-structured, and responsive analysis chart with risk management."""
+        fig, axs = plt.subplots(2, 1, figsize=(20, 10), constrained_layout=True)
         
-        # Price Chart with Position Markers
+        # Main Price Chart with Signals and Risk Management
         ax1 = axs[0]
-        ax1.plot(data.index, data['Close'], label='Price', color='royalblue', lw=1.5)
         
-        # Plot entry and exit points
-        entries = positions[positions['position'] > 0]
-        exits = positions[positions['position'] == 0]
+        # Plot price data using standard plot() with datetime index
+        ax1.plot(data.index, data['Close'], '-', label='Price', color='blue', linewidth=1.5)
         
-        ax1.scatter(entries.index, entries['entry_price'],
-                marker='^', s=100, color='limegreen', edgecolor='black',
-                label='Entry', zorder=5)
+        # Plot Buy and Sell Signals using plot()
+        buy_signals = signals == 'Long'
+        sell_signals = signals == 'Exit'
         
-        ax1.scatter(exits.index, data.loc[exits.index, 'Close'],
-                marker='v', s=100, color='crimson', edgecolor='black',
-                label='Exit', zorder=5)
+        if any(buy_signals):
+            ax1.plot(data.loc[buy_signals].index, 
+                    data.loc[buy_signals, 'Close'],
+                    '^', color='green', ms=10, label='Buy Signal')
         
-        # Plot dynamic stops and targets
-        ax1.plot(positions.index, positions['stop_loss'],
-                color='darkred', ls='--', lw=1.2, label='Stop Loss')
-        ax1.plot(positions.index, positions['take_profit'],
-                color='darkgreen', ls='--', lw=1.2, label='Take Profit')
+        if any(sell_signals):
+            ax1.plot(data.loc[sell_signals].index,
+                    data.loc[sell_signals, 'Close'],
+                    'v', color='red', ms=10, label='Sell Signal')
         
-        ax1.set_title(f'{ticker} Trading Analysis', fontsize=16, pad=20)
-        ax1.legend(loc='best', fontsize=10)
+        # Plot Stop Loss and Take Profit using plot()
+        valid_stops = positions['stop_loss'].notna()
+        valid_profits = positions['take_profit'].notna()
+        
+        if any(valid_stops):
+            ax1.plot(positions.loc[valid_stops].index,
+                    positions.loc[valid_stops, 'stop_loss'],
+                    '--', color='maroon', label='Stop Loss')
+        
+        if any(valid_profits):
+            ax1.plot(positions.loc[valid_profits].index,
+                    positions.loc[valid_profits, 'take_profit'],
+                    '--', color='darkblue', label='Take Profit')
+        
+        ax1.set_title(f'{ticker} Analysis - SMC Model', fontsize=16, fontweight='bold')
+        ax1.legend(loc='upper left', fontsize=12)
+        ax1.grid(True, linestyle='--', alpha=0.7)
+        
+        # Format x-axis using original datetime index
+        ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        ax1.tick_params(axis='x', rotation=45)
         
-        # Position Size Chart
+        # Annotate Buy and Sell Points with direct datetime handling
+        for idx, signal in signals.items():
+            if signal == 'Long':
+                ax1.annotate('Buy', 
+                            xy=(idx, data.loc[idx, 'Close']),
+                            xytext=(10, 20),
+                            textcoords='offset points',
+                            arrowprops=dict(arrowstyle='->', color='green'))
+            elif signal == 'Exit':
+                ax1.annotate('Sell',
+                            xy=(idx, data.loc[idx, 'Close']),
+                            xytext=(10, -20),
+                            textcoords='offset points',
+                            arrowprops=dict(arrowstyle='->', color='red'))
+        
+        # Trend Analysis (Moving Averages)
         ax2 = axs[1]
-        ax2.fill_between(positions.index, positions['position'], 
-                        color='teal', alpha=0.3, label='Position Size')
-        ax2.set_ylabel('Position Size', fontsize=10)
-        ax2.grid(True, alpha=0.4)
+        ma50 = data['Close'].rolling(50).mean()
+        ma200 = data['Close'].rolling(200).mean()
+        min50 = data['Close'].rolling(50).min()
+        max50 = data['Close'].rolling(50).max()
         
-        # Volatility Chart
-        ax3 = axs[2]
-        ax3.plot(data.index, data['atr'], 
-                color='purple', lw=1.2, label='ATR (Volatility)')
-        ax3.set_ylabel('ATR', fontsize=10)
-        ax3.grid(True, alpha=0.4)
+        ax2.plot(ma50.index, ma50, '-', label='50 DMA', color='orange', linewidth=1.5)
+        ax2.plot(ma200.index, ma200, '-', label='200 DMA', color='purple', linewidth=1.5)
+        ax2.fill_between(data.index, min50, max50, color='gray', alpha=0.2, label='50 Period Range')
         
-        # Save high-res responsive chart
-        os.makedirs('analysis_charts', exist_ok=True)  # Ensure directory exists
-        plt.savefig(f'analysis_charts/{ticker}_analysis.png', 
-                dpi=300, bbox_inches='tight')
-        plt.close()
+        ax2.set_title('Trend Analysis', fontsize=14, fontweight='bold')
+        ax2.legend(loc='upper left', fontsize=12)
+        ax2.grid(True, linestyle='--', alpha=0.7)
+        
+        # Format x-axis
+        ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        
+        # Rotate date labels and save
+        fig.autofmt_xdate()
+        os.makedirs('analysis_charts', exist_ok=True)
+        plt.savefig(f'analysis_charts/{ticker}_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
 
     def _get_universe_tickers(self, universe='sp500'):
-        """Get list of tickers for analysis, skipping invalid or delisted tickers"""
+        """Get list of tickers for analysis"""
         if universe == 'sp500':
             table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
-            tickers = table[0]['Symbol'].tolist()
+            return table[0]['Symbol'].tolist()
         elif universe == 'nasdaq100':
-            tickers = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100')[4]['Ticker'].tolist()
+            return pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100')[4]['Ticker'].tolist()
         else:
             raise ValueError("Unsupported universe")
-        
-        # Remove invalid tickers (e.g., BF.B)
-        valid_tickers = [ticker for ticker in tickers if '.' not in ticker]
-        return valid_tickers
 
     def generate_market_report(self, results):
-        """Generate validated market report with error handling"""
-        if not results:
-            print("No results to generate report")
-            return
-
-        try:
-            df = pd.DataFrame(results)
+        """Generate summary market report"""
+        df = pd.DataFrame(results)
+        df = df[df['current_signal'] == 'Long'].sort_values('return_1m', ascending=False)
+        
+        report = f"""
+        SMC Market Analysis Report - {datetime.today().date()}
+        ------------------------------------------------
+        Total Opportunities Found: {len(df)}
+        Top 5 Long Candidates:
+        {df.head(5).to_string(index=False)}
+        
+        Market Statistics:
+        Average 1M Return: {df.return_1m.mean():.2%}
+        Average Volatility: {df.volatility.mean():.2%}
+        """
+        
+        with open('market_report.txt', 'w') as f:
+            f.write(report)
             
-            # Initialize default values
-            report_content = f"""
-            SMC Market Analysis Report - {datetime.today().date()}
-            {'-'*50}
-            Total Assets Analyzed: {len(df)}
-            """
-            
-            # Check for signals and returns
-            if 'current_signal' not in df.columns:
-                report_content += "\nWarning: No valid signals generated"
-            else:
-                long_candidates = df[df['current_signal'] == 'Long']
-                report_content += f"""
-                Trading Opportunities Found: {len(long_candidates)}
-                """
-                
-                if not long_candidates.empty:
-                    report_content += """
-                    Top 5 Candidates:
-                    """ + long_candidates.sort_values('return_1m', ascending=False)\
-                        .head(5).to_string(index=False)
-            
-            # Add market statistics if available
-            if 'volatility' in df.columns:
-                report_content += f"""
-                Market Statistics:
-                Average 1M Return: {df['return_1m'].mean():.2%}
-                Average Volatility: {df['volatility'].mean():.2%}
-                """
-                
-            # Save and display report
-            print(report_content)
-            os.makedirs(PATHS['reports'], exist_ok=True)
-            with open(os.path.join(PATHS['reports'], 'market_report.txt'), 'w') as f:
-                f.write(report_content)
-                
-        except Exception as e:
-            print(f"Failed to generate report: {str(e)}")
-
+        print(report)
     def train_universal(self, stock_list, start_date, end_date):
         all_features = []
         all_labels = []
         
         for ticker in stock_list:
-            try:
-                data = download(ticker, start=start_date, end=end_date)
-                if data.empty or len(data) < 100:
-                    print(f"Skipped {ticker}: Insufficient data")
-                    continue
-                    
-                # Validate DataFrame columns
-                self.feature_engineer.validate_dataframe(data)
-                    
-                # Get features and aligned data
-                features, aligned_data = self.feature_engineer.calculate_features(data)
-                labels = self._generate_labels(aligned_data)
-                
-                # Check for sufficient data after processing
-                if len(features) < 30 or len(labels) < 30:
-                    print(f"Skipped {ticker}: Insufficient data after processing")
-                    continue
-                    
-                # Create sequences with correct alignment
-                seqs, lbls = self._create_sequences(features, labels)
-                if len(seqs) > 0:
-                    all_features.append(seqs)
-                    all_labels.append(lbls)
-                    
-            except Exception as e:
-                print(f"Error processing {ticker}: {str(e)}")
-                continue
+            raw_data = Ticker(ticker).history(start=start_date, end=end_date)
+            
+            # Calculate features and labels
+            features = self.feature_engineer.calculate_features(raw_data)
+            labels = self._generate_labels(raw_data)
+            
+            # Align lengths
+            min_length = min(len(features), len(labels))
+            features = features[:min_length]
+            labels = labels[:min_length]
+            
+            # Create sequences
+            seq_features, seq_labels = self._create_sequences(features, labels)
+            all_features.append(seq_features)
+            all_labels.append(seq_labels)
         
-        if not all_features:
-            raise ValueError("No valid training data accumulated")
-        
+        # Rest of training code remains the same
         X = np.concatenate(all_features)
         y = np.concatenate(all_labels)
         
@@ -609,10 +486,9 @@ class UniversalSMCPredictor:
     def _create_sequences(self, features, labels, window=30):
         sequences = []
         seq_labels = []
-        max_i = len(labels) - window
-        for i in range(max_i):
+        for i in range(len(features)-window):
             sequences.append(features[i:i+window])
-            seq_labels.append(labels[i + window])
+            seq_labels.append(labels[i+window])
         return np.array(sequences), np.array(seq_labels)
 
     def predict_stock(self, ticker):
@@ -624,28 +500,24 @@ class UniversalSMCPredictor:
 
 # Usage Example
 if __name__ == "__main__":
-    risk_params = {
-        'risk_per_trade': 0.02,
-        'stop_loss_multiplier': 1.5,
-        'take_profit_multiplier': 3.0,
-        'max_position_size': 0.15
-    }
+    smc = UniversalSMCPredictor()
     
-    predictor = UniversalSMCPredictor()
-    
+    # Load pre-trained model or train new
     try:
-        predictor.load_model(r'C:\Roshan\nepse predictor\trained_models\model.keras')
+        smc.load_model()
     except:
-        print("Training new model...")
-        predictor.train_universal(['SPY', 'QQQ', 'AAPL'], '2010-01-01', '2023-01-01')
-        predictor.save_model(r'C:\Roshan\nepse predictor\trained_models\model.keras')
+        smc.train_universal(['SPY', 'QQQ'], '2010-01-01', '2023-01-01')
+        smc.save_model()
     
-    results = predictor.analyze_market(universe='sp500')
+    # Full market analysis
+    results = smc.analyze_market(universe='sp500')
     
-    if results:
-        top_pick = results[0]['ticker']
-        data = download(top_pick, period='1y')
-        signals = predictor.generate_signals(data)
-        positions = predictor.calculate_positions(data, signals)
-        print(f"\nPosition Summary for {top_pick}:")
-        print(positions[['position', 'entry_price', 'stop_loss', 'take_profit']].tail())
+    # Generate positions for top candidate
+    top_pick = results[0]['ticker']
+    data = download(top_pick, period='1y')
+    features = smc.feature_engineer.calculate_features(data)
+    signals = smc.generate_signals(features)
+    positions = smc.calculate_positions(data, signals)
+    
+    print(f"\nRecommended Position for {top_pick}:")
+    print(positions.tail(10))
