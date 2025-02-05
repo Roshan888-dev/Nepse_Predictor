@@ -1,2 +1,4 @@
 myenv/
-.data_cache
+.data_cache/
+.vscode/
+__pycache__/
