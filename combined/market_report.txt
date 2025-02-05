@@ -1,0 +1,14 @@
+
+        SMC Market Analysis Report - 2025-02-05
+        ------------------------------------------------
+        Total Opportunities Found: 3
+        Top 5 Long Candidates:
+        ticker current_signal  return_1m  volatility
+   CMI           Long   0.045621    0.249045
+  REGN           Long  -0.025364    0.233768
+   CRL           Long  -0.106877    0.373058
+        
+        Market Statistics:
+        Average 1M Return: -2.89%
+        Average Volatility: 28.53%
+        

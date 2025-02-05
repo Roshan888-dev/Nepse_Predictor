@@ -185,62 +185,151 @@ class SMCTrainer:
         return positions
 
     def plot_analysis(self, ticker, data, signals, positions):
-        """Generate analysis charts."""
-        fig, axs = plt.subplots(2, 1, figsize=(20, 10), constrained_layout=True)
+        """Generate institutional-grade SMC analysis charts with detailed trade positioning."""
+        plt.style.use('seaborn')
+        fig = plt.figure(figsize=(24, 18))
+        gs = fig.add_gridspec(4, 1, height_ratios=[3, 1, 1, 1])
         
+        # ======================
         # Main Price Chart
-        ax1 = axs[0]
-        ax1.plot(data.index, data['Close'], '-', label='Price', color='blue', linewidth=1.5)
+        # ======================
+        ax1 = fig.add_subplot(gs[0])
+        ax1.plot(data['Close'], label='Price', color='black', linewidth=1.5, zorder=5)
         
-        buy_signals = signals == 'Long'
-        sell_signals = signals == 'Exit'
+        # Plot key levels and zones
+        self._plot_liquidity_zones(ax1, data)
+        self._plot_order_blocks(ax1, data)
+        self._plot_fair_value_gaps(ax1, data)
         
-        if any(buy_signals):
-            ax1.plot(data.loc[buy_signals].index, 
-                    data.loc[buy_signals, 'Close'],
-                    '^', color='green', ms=10, label='Buy Signal')
+        # Plot trades with detailed positioning
+        self._plot_trade_positions(ax1, data, positions)
         
-        if any(sell_signals):
-            ax1.plot(data.loc[sell_signals].index,
-                    data.loc[sell_signals, 'Close'],
-                    'v', color='red', ms=10, label='Sell Signal')
-        
-        valid_stops = positions['stop_loss'].notna()
-        valid_profits = positions['take_profit'].notna()
-        
-        if any(valid_stops):
-            ax1.plot(positions.loc[valid_stops].index,
-                    positions.loc[valid_stops, 'stop_loss'],
-                    '--', color='maroon', label='Stop Loss')
-        
-        if any(valid_profits):
-            ax1.plot(positions.loc[valid_profits].index,
-                    positions.loc[valid_profits, 'take_profit'],
-                    '--', color='darkblue', label='Take Profit')
-        
-        ax1.set_title(f'{ticker} Analysis - SMC Model', fontsize=16, fontweight='bold')
+        # Formatting
+        ax1.set_title(f'{ticker} Institutional SMC Analysis', fontsize=20, pad=20)
         ax1.legend(loc='upper left', fontsize=12)
         ax1.grid(True, linestyle='--', alpha=0.7)
         
-        # Trend Analysis
-        ax2 = axs[1]
-        ma50 = data['Close'].rolling(50).mean()
-        ma200 = data['Close'].rolling(200).mean()
-        min50 = data['Close'].rolling(50).min()
-        max50 = data['Close'].rolling(50).max()
+        # ======================
+        # Volume Profile
+        # ======================
+        ax2 = fig.add_subplot(gs[1], sharex=ax1)
+        volume_colors = np.where(data['Close'] > data['Open'], 'forestgreen', 'firebrick')
+        ax2.bar(data.index, data['Volume'], color=volume_colors, alpha=0.7, width=0.6)
+        ax2.set_title('Volume Profile', fontsize=14, pad=15)
+        ax2.set_ylabel('Volume', fontsize=12)
+        ax2.grid(axis='y', linestyle='--', alpha=0.5)
         
-        ax2.plot(ma50.index, ma50, '-', label='50 DMA', color='orange', linewidth=1.5)
-        ax2.plot(ma200.index, ma200, '-', label='200 DMA', color='purple', linewidth=1.5)
-        ax2.fill_between(data.index, min50, max50, color='gray', alpha=0.2, label='50 Period Range')
+        # ======================
+        # Market Structure
+        # ======================
+        ax3 = fig.add_subplot(gs[2], sharex=ax1)
+        self._plot_market_structure(ax3, data)
         
-        ax2.set_title('Trend Analysis', fontsize=14, fontweight='bold')
-        ax2.legend(loc='upper left', fontsize=12)
-        ax2.grid(True, linestyle='--', alpha=0.7)
+        # ======================
+        # Risk Management
+        # ======================
+        ax4 = fig.add_subplot(gs[3], sharex=ax1)
+        self._plot_risk_parameters(ax4, positions)
+        
+        # Formatting
+        plt.subplots_adjust(hspace=0.1)
+        plt.xticks(rotation=45)
         
         # Save plot
         os.makedirs('analysis_charts', exist_ok=True)
-        plt.savefig(f'analysis_charts/{ticker}_analysis.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'analysis_charts/{ticker}_institutional_analysis.png', dpi=300, bbox_inches='tight')
         plt.close(fig)
+
+    def _plot_liquidity_zones(self, ax, data):
+        """Plot liquidity zones on the price chart."""
+        swing_highs = data['High'][(data['High'] > data['High'].shift(1)) & 
+                                (data['High'] > data['High'].shift(-1))]
+        swing_lows = data['Low'][(data['Low'] < data['Low'].shift(1)) & 
+                                (data['Low'] < data['Low'].shift(-1))]
+        
+        for high in swing_highs:
+            ax.axhline(high, color='red', linestyle='--', alpha=0.3, zorder=1)
+        for low in swing_lows:
+            ax.axhline(low, color='green', linestyle='--', alpha=0.3, zorder=1)
+
+    def _plot_order_blocks(self, ax, data):
+        """Plot order blocks on the price chart."""
+        ob_bullish = data[data['ob_strength'] > 0.8]
+        ob_bearish = data[data['ob_strength'] < -0.8]
+        
+        for idx, row in ob_bullish.iterrows():
+            ax.axhspan(row['Low'], row['High'], color='green', alpha=0.1, zorder=2)
+        for idx, row in ob_bearish.iterrows():
+            ax.axhspan(row['Low'], row['High'], color='red', alpha=0.1, zorder=2)
+
+    def _plot_fair_value_gaps(self, ax, data):
+        """Plot fair value gaps on the price chart."""
+        for i in range(1, len(data)-1):
+            if data['Low'].iloc[i] > data['High'].iloc[i+1]:  # Bearish FVG
+                ax.axhspan(data['High'].iloc[i+1], data['Low'].iloc[i], 
+                        color='red', alpha=0.2, zorder=3)
+            elif data['High'].iloc[i] < data['Low'].iloc[i+1]:  # Bullish FVG
+                ax.axhspan(data['High'].iloc[i], data['Low'].iloc[i+1], 
+                        color='green', alpha=0.2, zorder=3)
+
+    def _plot_trade_positions(self, ax, data, positions):
+        """Plot detailed trade positions with risk management."""
+        in_position = False
+        for i in range(len(positions)):
+            if positions['position'].iloc[i] > 0 and not in_position:
+                # Entry point
+                entry_price = positions['entry_price'].iloc[i]
+                stop_loss = positions['stop_loss'].iloc[i]
+                take_profit = positions['take_profit'].iloc[i]
+                
+                # Plot entry
+                ax.plot(positions.index[i], entry_price, 
+                    marker='^', markersize=12, color='blue', zorder=10)
+                
+                # Plot SL and TP
+                ax.hlines(stop_loss, positions.index[i-5], positions.index[i+5],
+                        colors='red', linestyles='--', alpha=0.7)
+                ax.hlines(take_profit, positions.index[i-5], positions.index[i+5],
+                        colors='green', linestyles='--', alpha=0.7)
+                
+                # Fill between SL and TP
+                ax.fill_between(positions.index[i-5:i+5], stop_loss, take_profit,
+                            color='blue', alpha=0.1)
+                
+                in_position = True
+            elif positions['position'].iloc[i] == 0 and in_position:
+                # Exit point
+                exit_price = data['Close'].iloc[i]
+                ax.plot(positions.index[i], exit_price,
+                    marker='o', markersize=8, color='purple', zorder=10)
+                
+                # Annotate trade outcome
+                pnl = (exit_price - entry_price) / entry_price
+                color = 'green' if pnl > 0 else 'red'
+                ax.annotate(f'{pnl:.1%}', (positions.index[i], exit_price),
+                        textcoords="offset points", xytext=(0,10),
+                        ha='center', color=color, fontsize=10)
+                
+                in_position = False
+
+    def _plot_market_structure(self, ax, data):
+        """Plot market structure shifts."""
+        structure_changes = data[data['market_structure'].abs() > 0]
+        for idx, row in structure_changes.iterrows():
+            if row['market_structure'] > 0:
+                ax.axvline(idx, color='green', alpha=0.5, linestyle='--')
+            else:
+                ax.axvline(idx, color='red', alpha=0.5, linestyle='--')
+        ax.set_title('Market Structure Shifts', fontsize=14)
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+    def _plot_risk_parameters(self, ax, positions):
+        """Plot position sizing and risk parameters."""
+        ax.plot(positions['position'], label='Position Size', color='blue')
+        ax.set_title('Risk Management Parameters', fontsize=14)
+        ax.set_ylabel('Position Size', fontsize=12)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend()
 
     def _get_universe_tickers(self, universe='sp500'):
         """Get list of tickers for analysis."""
