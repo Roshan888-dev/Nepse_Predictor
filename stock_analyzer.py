@@ -2,9 +2,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-import yfinance as yf
+import yfinance as yf  # For fetching data from Yahoo Finance
 from matplotlib.dates import date2num, DateFormatter
-from mplfinance.original_flavor import candlestick_ohlc
+from mplfinance.original_flavor import candlestick_ohlc  # For candlestick charting
 
 # ======================
 # Data Requirements
@@ -31,12 +31,8 @@ class SMC_Analyzer:
         self.imbalances = []
         self.supply_demand_zones = []
         self.wyckoff_phases = []
-        self.elliott_waves = []
-        self.demand_zones = []
-        self.supply_zones = []
-        self.mmc_levels = []
-
-    # Market Structure Analysis
+    
+    # Market Structure Analysis (unchanged)
     def analyze_market_structure(self, df):
         structure = []
         highs = df['High']
@@ -59,8 +55,8 @@ class SMC_Analyzer:
         
         self.market_structure = structure
         return structure
-
-    # Order Block Detection
+    
+    # Order Block Detection (unchanged)
     def identify_order_blocks(self, df):
         blocks = []
         for i in range(2, len(df)):
@@ -80,8 +76,8 @@ class SMC_Analyzer:
         
         self.order_blocks = blocks
         return blocks
-
-    # Liquidity Zone Identification
+    
+    # Liquidity Zone Identification (unchanged)
     def find_liquidity_zones(self, df):
         swing_highs = df['High'][(df['High'] > df['High'].shift(1)) & 
                                 (df['High'] > df['High'].shift(-1))]
@@ -95,8 +91,8 @@ class SMC_Analyzer:
             'equal_lows': df[df['Low'] == df['Low'].shift(1)]['Low'].tolist()
         }
         return self.liquidity_zones
-
-    # Fair Value Gap Detection
+    
+    # Fair Value Gap Detection (unchanged)
     def detect_imbalances(self, df):
         imbalances = []
         for i in range(1, len(df)-1):
@@ -117,8 +113,8 @@ class SMC_Analyzer:
         
         self.imbalances = imbalances
         return imbalances
-
-    # Wyckoff Phase Analysis
+    
+    # Wyckoff Phase Analysis (unchanged)
     def analyze_wyckoff(self, df):
         phases = []
         vwap = df['VWAP'] if 'VWAP' in df.columns else df['Close']
@@ -139,40 +135,56 @@ class SMC_Analyzer:
         self.wyckoff_phases = phases
         return phases
 
-    # Detect Demand and Supply Zones
-    def detect_demand_supply_zones(self, df):
-        demand_zones = []
-        supply_zones = []
+    def detect_elliott_waves(self, df, swing_period=5):
+        waves = []
+        # Get swing highs and lows and reset their indices so we can use positional indexing safely.
+        swing_highs = df['High'][(df['High'] > df['High'].shift(1)) & 
+                                (df['High'] > df['High'].shift(-1))].reset_index(drop=True)
+        swing_lows = df['Low'][(df['Low'] < df['Low'].shift(1)) & 
+                                (df['Low'] < df['Low'].shift(-1))].reset_index(drop=True)
         
-        for i in range(1, len(df)-1):
-            # Demand Zone: Strong bullish candle after a bearish move
-            if (df['Close'].iloc[i] > df['Open'].iloc[i] and
-                df['Close'].iloc[i-1] < df['Open'].iloc[i-1] and
-                df['Volume'].iloc[i] > df['Volume'].iloc[i-1]):
-                demand_zones.append(('Demand Zone', df.index[i], df['Low'].iloc[i]))
+        # For impulse waves we need:
+        # - For swing_highs: indices i to i+4 (so i+4 must be < len(swing_highs))
+        # - For swing_lows: indices i to i+5 (so i+5 must be < len(swing_lows))
+        max_index = min(len(swing_highs) - 4, len(swing_lows) - 5)
+        
+        for i in range(0, max_index):
+            wave1 = (swing_lows.iloc[i] < swing_lows.iloc[i+1] < 
+                    swing_lows.iloc[i+2] < swing_lows.iloc[i+3] < 
+                    swing_lows.iloc[i+4])
+            wave2 = swing_highs.iloc[i] > swing_highs.iloc[i+1]
+            wave3 = swing_lows.iloc[i+2] < swing_lows.iloc[i+3]
+            wave4 = swing_highs.iloc[i+3] > swing_highs.iloc[i+4]
+            wave5 = swing_lows.iloc[i+4] < swing_lows.iloc[i+5]
             
-            # Supply Zone: Strong bearish candle after a bullish move
-            if (df['Close'].iloc[i] < df['Open'].iloc[i] and
-                df['Close'].iloc[i-1] > df['Open'].iloc[i-1] and
-                df['Volume'].iloc[i] > df['Volume'].iloc[i-1]):
-                supply_zones.append(('Supply Zone', df.index[i], df['High'].iloc[i]))
+            if wave1 and wave2 and wave3 and wave4 and wave5:
+                # Use the original DataFrame's index for the wave points.
+                # Since the swing series have been reset, you might need to map these positions
+                # back to the original index if required.
+                waves.append(('Impulse', 'bullish', 
+                            (df.index[i], swing_lows.iloc[i]),
+                            (df.index[i+1], swing_highs.iloc[i+1]),
+                            (df.index[i+2], swing_lows.iloc[i+2]),
+                            (df.index[i+3], swing_highs.iloc[i+3]),
+                            (df.index[i+4], swing_lows.iloc[i+4])))
         
-        self.demand_zones = demand_zones
-        self.supply_zones = supply_zones
-        return demand_zones, supply_zones
+        # For corrective waves we need indices i to i+3 for swing highs and i to i+2 for swing lows.
+        max_index_corr = min(len(swing_highs) - 3, len(swing_lows) - 2)
+        
+        for i in range(0, max_index_corr):
+            waveA = swing_highs.iloc[i] > swing_highs.iloc[i+1]
+            waveB = swing_lows.iloc[i+1] < swing_lows.iloc[i+2]
+            waveC = swing_highs.iloc[i+2] > swing_highs.iloc[i+3]
+            
+            if waveA and waveB and waveC:
+                waves.append(('Corrective', 'bearish',
+                            (df.index[i], swing_highs.iloc[i]),
+                            (df.index[i+1], swing_lows.iloc[i+1]),
+                            (df.index[i+2], swing_highs.iloc[i+2])))
+        
+        self.elliott_waves = waves
+        return waves
 
-    # Market Maker Concept (MMC) Levels
-    def detect_mmc_levels(self, df):
-        mmc_levels = []
-        for i in range(1, len(df)-1):
-            # Key Levels: Previous Highs and Lows
-            if df['High'].iloc[i] == df['High'].iloc[i-1]:
-                mmc_levels.append(('MMC Resistance', df.index[i], df['High'].iloc[i]))
-            if df['Low'].iloc[i] == df['Low'].iloc[i-1]:
-                mmc_levels.append(('MMC Support', df.index[i], df['Low'].iloc[i]))
-        
-        self.mmc_levels = mmc_levels
-        return mmc_levels
 
 # ======================
 # Apple Trading System
@@ -194,8 +206,7 @@ class Apple_SMC_TradingSystem:
         self.analyzer.find_liquidity_zones(self.data)
         self.analyzer.detect_imbalances(self.data)
         self.analyzer.analyze_wyckoff(self.data)
-        self.analyzer.detect_demand_supply_zones(self.data)
-        self.analyzer.detect_mmc_levels(self.data)
+        self.analyzer.detect_elliott_waves(self.data)
         return self.data
     
     def generate_signals(self):
@@ -212,21 +223,20 @@ class Apple_SMC_TradingSystem:
                     elif block[0] == 'Bearish OB' and price >= block[2]:
                         signal = 'Sell'
             
-            # Check Demand and Supply Zones
-            for zone in self.analyzer.demand_zones:
-                if abs(price - zone[2]) < price*0.005:
-                    signal = 'Buy'
-            for zone in self.analyzer.supply_zones:
-                if abs(price - zone[2]) < price*0.005:
+            # Check Liquidity Zones
+            for zone in self.analyzer.liquidity_zones['swing_highs']:
+                if abs(price - zone) < price*0.005:
                     signal = 'Sell'
+            for zone in self.analyzer.liquidity_zones['swing_lows']:
+                if abs(price - zone) < price*0.005:
+                    signal = 'Buy'
             
-            # Check MMC Levels
-            for level in self.analyzer.mmc_levels:
-                if abs(price - level[2]) < price*0.005:
-                    if level[0] == 'MMC Support':
-                        signal = 'Buy'
-                    elif level[0] == 'MMC Resistance':
-                        signal = 'Sell'
+            # Check Imbalances
+            for imb in self.analyzer.imbalances:
+                if imb[0] == 'Bullish FVG' and imb[2] <= price <= imb[3]:
+                    signal = 'Buy'
+                elif imb[0] == 'Bearish FVG' and imb[2] <= price <= imb[3]:
+                    signal = 'Sell'
             
             signals.append(signal)
         
@@ -275,7 +285,7 @@ class Apple_SMC_TradingSystem:
                        for h in horizons}
         }
         return self.accuracy_results
-
+    
 # ======================
 # Visualization
 # ======================
@@ -320,6 +330,10 @@ def plot_apple_analysis(data, analyzer, accuracy_results):
     by_label = dict(zip(labels, handles))
     ax1.legend(by_label.values(), by_label.keys())
 
+    # ======================
+    # Enhanced SMC Concepts
+    # ======================
+    
     # Highlight Major Order Blocks with larger markers
     for block in analyzer.order_blocks:
         date_num = date2num(block[1])
@@ -330,21 +344,60 @@ def plot_apple_analysis(data, analyzer, accuracy_results):
             ax1.plot(date_num, block[2], 'v', markersize=12, color='magenta', alpha=0.7,
                      markeredgecolor='black', zorder=9, label='Major Bearish OB')
     
-    # Draw Demand and Supply Zones
-    for zone in analyzer.demand_zones:
-        date_num = date2num(zone[1])
-        ax1.axhline(y=zone[2], color='green', linestyle='--', alpha=0.5, label='Demand Zone')
-    for zone in analyzer.supply_zones:
-        date_num = date2num(zone[1])
-        ax1.axhline(y=zone[2], color='red', linestyle='--', alpha=0.5, label='Supply Zone')
+    # Draw Elliott Waves
+    wave_colors = {'Impulse': 'blue', 'Corrective': 'orange'}
+    for wave in analyzer.elliott_waves:
+        wave_type = wave[0]
+        color = wave_colors.get(wave_type, 'gray')
+        points = wave[2:]  # Get wave points
+        
+        # Draw connecting lines
+        for i in range(len(points)-1):
+            start_date = date2num(points[i][0])
+            end_date = date2num(points[i+1][0])
+            ax1.plot([start_date, end_date], [points[i][1], points[i+1][1]],
+                    color=color, linewidth=2, linestyle='--', alpha=0.7)
+        
+        # Add wave labels
+        label_pos = date2num(points[0][0]) + 0.2*(date2num(points[-1][0]) - date2num(points[0][0]))
+        price_pos = min(p[1] for p in points) if wave_type == 'Impulse' else max(p[1] for p in points)
+        label = f"{wave_type} Wave\n({wave[1]})"
+        ax1.text(label_pos, price_pos, label, color=color, fontsize=10, 
+                bbox=dict(facecolor='white', alpha=0.8))
     
-    # Draw MMC Levels
-    for level in analyzer.mmc_levels:
-        date_num = date2num(level[1])
-        if level[0] == 'MMC Support':
-            ax1.axhline(y=level[2], color='blue', linestyle='--', alpha=0.5, label='MMC Support')
-        elif level[0] == 'MMC Resistance':
-            ax1.axhline(y=level[2], color='orange', linestyle='--', alpha=0.5, label='MMC Resistance')
+    # Highlight Key SMC Elements
+    # Draw rectangles around major FVGs
+    for imb in analyzer.imbalances:
+        if abs(imb[3] - imb[2]) > data['Close'].mean() * 0.03:  # Only major gaps
+            date_num = date2num(imb[1])
+            rect = plt.Rectangle((date_num-0.4, imb[2]), 0.8, imb[3]-imb[2],
+                                color='yellow' if 'Bullish' in imb[0] else 'purple',
+                                alpha=0.3, zorder=1)
+            ax1.add_patch(rect)
+    
+    # Annotate Wyckoff Phases
+    for phase in analyzer.wyckoff_phases:
+        date_num = date2num(phase[1])
+        price = data.loc[phase[1]]['Close']
+        ax1.annotate(phase[0], (date_num, price),
+                    xytext=(0, 20), textcoords='offset points',
+                    arrowprops=dict(arrowstyle="->", color='gray'),
+                    fontsize=9, color='darkblue')
+    
+    # Draw support and resistance lines for the current trend.
+    # For this example, we use the last 20 candles to define the current trend.
+    N = 20
+    if len(data) >= N:
+        recent_data = data.iloc[-N:]
+        support = recent_data['Low'].min()
+        resistance = recent_data['High'].max()
+        min_date = date2num(data.index[0])
+        max_date = date2num(data.index[-1])
+        ax1.hlines(y=support, xmin=min_date, xmax=max_date, colors='blue', linestyles='--', linewidth=1.5, label='Support')
+        ax1.hlines(y=resistance, xmin=min_date, xmax=max_date, colors='red', linestyles='--', linewidth=1.5, label='Resistance')
+        # Add text labels for support and resistance
+        ax1.text(max_date, support, f' Support: {support:.2f}', verticalalignment='bottom', color='blue', fontsize=10)
+        ax1.text(max_date, resistance, f' Resistance: {resistance:.2f}', verticalalignment='top', color='red', fontsize=10)
     
     # Add an accuracy annotation inside the candlestick subplot
     accuracy_text = (
