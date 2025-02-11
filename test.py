@@ -280,94 +280,130 @@ class Apple_SMC_TradingSystem:
 # Visualization
 # ======================
 def plot_apple_analysis(data, analyzer, accuracy_results):
-    # Create a figure with two subplots: one for the candlestick chart and one for volume
+    # Create a figure with two subplots
     fig = plt.figure(figsize=(24, 18))
     ax1 = plt.subplot(2, 1, 1)
     
     # Prepare data for candlestick chart
-    data_ohlc = data.copy()
-    data_ohlc.reset_index(inplace=True)  # Move the date index into a column
-    data_ohlc['Date'] = data_ohlc['Date'].map(date2num)  # Convert dates to numeric format
+    data_ohlc = data.copy().reset_index()
+    data_ohlc['Date'] = data_ohlc['Date'].map(date2num)
     ohlc = data_ohlc[['Date','Open','High','Low','Close']].values
 
-    # Plot the candlestick chart
-    candlestick_ohlc(ax1, ohlc, width=0.6, colorup='green', colordown='red', alpha=0.8)
+    # Plot candlestick chart
+    candlestick_ohlc(ax1, ohlc, width=0.6, colorup='g', colordown='r', alpha=0.8)
     ax1.xaxis_date()
     ax1.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
-    plt.title('NVDA Stock Analysis with SMC Signals, Elliott Waves, and Accuracy Metrics (Candlestick)')
+    plt.title('NVDA Stock Analysis with SMC Signals and Market Structure')
+
+    # Custom legend tracker
+    legend_elements = {}
     
-    # Plot signals with success/failure markers on the candlestick chart
+    # Plot signals with enhanced markers
     signals = data[data['Signal'].notnull()]
     for idx, row in signals.iterrows():
         date_num = date2num(idx)
         signal_type = row['Signal']
-        success_5d = False
-        pos = data.index.get_loc(idx)
-        if pos + 5 < len(data):
-            future_prices = data['Close'].iloc[pos+1:pos+6]
-            if signal_type == 'Buy':
-                success_5d = any(future_prices > row['Close'])
-            elif signal_type == 'Sell':
-                success_5d = any(future_prices < row['Close'])
-        marker_color = 'green' if success_5d else 'red'
-        marker_style = '^' if signal_type == 'Buy' else 'v'
-        ax1.plot(date_num, row['Close'], marker=marker_style, markersize=10,
-                 color=marker_color, markeredgecolor='black', linestyle='None',
-                 label=f"{signal_type} Signal")
-    
-    # Remove duplicate legend entries
-    handles, labels = ax1.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax1.legend(by_label.values(), by_label.keys())
+        
+        # Fix: apply any() only once depending on the signal type.
+        if signal_type == 'Buy':
+            success_5d = any(data['Close'].loc[idx:idx+pd.Timedelta(days=5)] > row['Close'])
+        else:
+            success_5d = any(data['Close'].loc[idx:idx+pd.Timedelta(days=5)] < row['Close'])
+        
+        marker_props = {
+            'marker': '^' if signal_type == 'Buy' else 'v',
+            'markersize': 12,
+            'color': 'lime' if success_5d else 'red',
+            'markeredgecolor': 'black',
+            'zorder': 9
+        }
+        ax1.plot(date_num, row['Close'], **marker_props, linestyle='None')
+        legend_label = f"{signal_type} Signal ({'Success' if success_5d else 'Fail'})"
+        if legend_label not in legend_elements:
+            legend_elements[legend_label] = marker_props
 
-    # Highlight Major Order Blocks with larger markers
+    # Plot Demand/Supply Zones with shading
+    zone_alpha = 0.2
+    for zone in analyzer.demand_zones:
+        start = date2num(zone[1] - pd.Timedelta(days=2))
+        end = date2num(zone[1] + pd.Timedelta(days=2))
+        ax1.axhspan(zone[2]*0.995, zone[2]*1.005, start, end, 
+                    facecolor='green', alpha=zone_alpha)
+        if 'Demand Zone' not in legend_elements:
+            legend_elements['Demand Zone'] = plt.Rectangle((0,0),1,1, fc='green', alpha=zone_alpha)
+
+    for zone in analyzer.supply_zones:
+        start = date2num(zone[1] - pd.Timedelta(days=2))
+        end = date2num(zone[1] + pd.Timedelta(days=2))
+        ax1.axhspan(zone[2]*0.995, zone[2]*1.005, start, end,
+                    facecolor='red', alpha=zone_alpha)
+        if 'Supply Zone' not in legend_elements:
+            legend_elements['Supply Zone'] = plt.Rectangle((0,0),1,1, fc='red', alpha=zone_alpha)
+
+    # Plot Order Blocks with connection lines
     for block in analyzer.order_blocks:
         date_num = date2num(block[1])
-        if 'Bullish' in block[0]:
-            ax1.plot(date_num, block[2], '^', markersize=12, color='lime', alpha=0.7, 
-                     markeredgecolor='black', zorder=9, label='Major Bullish OB')
-        else:
-            ax1.plot(date_num, block[2], 'v', markersize=12, color='magenta', alpha=0.7,
-                     markeredgecolor='black', zorder=9, label='Major Bearish OB')
-    
-    # Draw Demand and Supply Zones
-    for zone in analyzer.demand_zones:
-        date_num = date2num(zone[1])
-        ax1.axhline(y=zone[2], color='green', linestyle='--', alpha=0.5, label='Demand Zone')
-    for zone in analyzer.supply_zones:
-        date_num = date2num(zone[1])
-        ax1.axhline(y=zone[2], color='red', linestyle='--', alpha=0.5, label='Supply Zone')
-    
-    # Draw MMC Levels
-    for level in analyzer.mmc_levels:
-        date_num = date2num(level[1])
-        if level[0] == 'MMC Support':
-            ax1.axhline(y=level[2], color='blue', linestyle='--', alpha=0.5, label='MMC Support')
-        elif level[0] == 'MMC Resistance':
-            ax1.axhline(y=level[2], color='orange', linestyle='--', alpha=0.5, label='MMC Resistance')
-    
-    # Add an accuracy annotation inside the candlestick subplot
+        style = '^' if 'Bullish' in block[0] else 'v'
+        color = 'darkgreen' if 'Bullish' in block[0] else 'darkred'
+        ax1.plot(date_num, block[2], style, markersize=10, color=color,
+                 markeredgecolor='black', zorder=8)
+        # Draw horizontal line to current price
+        current_price = data['Close'].iloc[-1]
+        ax1.plot([date_num, date2num(data.index[-1])], [block[2], current_price],
+                 color=color, alpha=0.3, linestyle='--')
+        legend_label = f"{block[0]} Trendline"
+        if legend_label not in legend_elements:
+            legend_elements[legend_label] = plt.Line2D([0],[0], color=color, linestyle='--')
+
+    # Enhanced Accuracy Annotation
     accuracy_text = (
-        f"5-Day Signal Accuracy:\n"
-        f"Buy: {accuracy_results['Buy'][5]:.1f}%\n"
-        f"Sell: {accuracy_results['Sell'][5]:.1f}%"
+        "Signal Accuracy:\n"
+        "Buy Signals:\n"
+        f"  1-Day: {accuracy_results['Buy'][1]:.1f}%\n"
+        f"  3-Day: {accuracy_results['Buy'][3]:.1f}%\n"
+        f"  5-Day: {accuracy_results['Buy'][5]:.1f}%\n"
+        "\nSell Signals:\n"
+        f"  1-Day: {accuracy_results['Sell'][1]:.1f}%\n"
+        f"  3-Day: {accuracy_results['Sell'][3]:.1f}%\n"
+        f"  5-Day: {accuracy_results['Sell'][5]:.1f}%"
     )
-    ax1.annotate(accuracy_text, xy=(0.02, 0.95),
-                 xycoords='axes fraction',
-                 fontsize=12, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    # Volume Chart
+    ax1.annotate(accuracy_text, xy=(0.75, 0.95), xycoords='axes fraction',
+                 fontsize=12, bbox=dict(boxstyle='round', facecolor='white', alpha=0.9),
+                 verticalalignment='top')
+
+    # Market Structure Statistics
+    stats_text = (
+        "Market Structure:\n"
+        f"Order Blocks: {len(analyzer.order_blocks)}\n"
+        f"Demand/Supply Zones: {len(analyzer.demand_zones)}/{len(analyzer.supply_zones)}\n"
+        f"Wyckoff Phases: {len(analyzer.wyckoff_phases)}\n"
+        f"Fair Value Gaps: {len(analyzer.imbalances)}"
+    )
+    ax1.annotate(stats_text, xy=(0.02, 0.15), xycoords='axes fraction',
+                 fontsize=12, bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+
+    # Create unified legend
+    handles = [plt.Line2D([0], [0], **props) if isinstance(props, dict) 
+               else props for label, props in legend_elements.items()]
+    labels = list(legend_elements.keys())
+    ax1.legend(handles, labels, loc='upper left', fontsize=10)
+
+    # Volume Chart with SMA
     ax2 = plt.subplot(2, 1, 2, sharex=ax1)
-    volume_dates = [date2num(idx) for idx in data.index]
-    colors = np.where(data['Close'] > data['Open'], 'g', 'r')
-    ax2.bar(volume_dates, data['Volume'], color=colors, alpha=0.7, width=0.6)
-    plt.title('Volume Profile')
-    plt.ylabel('Volume')
-    ax2.xaxis_date()
-    ax2.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
+    volume_colors = np.where(data['Close'] > data['Open'], 'g', 'r')
+    ax2.bar(data_ohlc['Date'], data['Volume'], color=volume_colors, width=0.6, alpha=0.7)
     
+    # Add 20-period Volume SMA
+    volume_sma = data['Volume'].rolling(20).mean()
+    ax2.plot(data_ohlc['Date'], volume_sma, color='purple', linewidth=2, label='20-SMA')
+    ax2.legend()
+    
+    plt.ylabel('Volume')
+    ax2.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
+    plt.title('Volume with 20-period SMA')
     plt.tight_layout()
     plt.show()
+
 
 # ======================
 # Usage Example
@@ -405,5 +441,8 @@ if __name__ == "__main__":
           f"{len(system.analyzer.liquidity_zones['swing_lows'])} Swing Lows")
     print(f"Fair Value Gaps Detected: {len(system.analyzer.imbalances)}")
     print(f"Wyckoff Phases Identified: {len(system.analyzer.wyckoff_phases)}")
+    print(f"Demand Zones Identified: {len(system.analyzer.demand_zones)}")
+    print(f"Supply Zones Identified: {len(system.analyzer.supply_zones)}")
+    print(f"MMC Levels Identified: {len(system.analyzer.mmc_levels)}")
     
     plot_apple_analysis(signal_data, system.analyzer, accuracy)
